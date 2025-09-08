@@ -129,22 +129,44 @@ Below are some Dockerfile instructions that are commonly used:
   * When the failure counter reaches the specified `retries` value, the container's status becomes unhealthy.
   * If a health check passes after a failure, the failure counter is reset to `0`.
 
+* `STOPSIGNAL` – It sets the system call signal that is sent to the container to exit gracefully when `docker stop` command is executed. The default stop signal is `SIGTERM`. Other stop signals include `SIGSTOP`, `SIGQUIT`, `SIGKILL`, `SIGINT`, `SIGCONT`, etc.
+  ```
+  STOPSIGNAL <signal>
+  ```
+
+* `ONBUILD` – It adds a trigger instruction to an image that will be executed later, when the image is used as a base for another build via a `FROM` instruction. This is useful for building language-specific base images that standardize dependency installation and source code copying for downstream applications.
+  ```
+  ONBUILD <instruction>
+  ```
+
+Using Docker's multi-stage build feature, a single `Dockerfile` can be used to generate several images. This feature separates the build process into distinct stages to produce a smaller, optimized final image by excluding unnecessary build-time dependencies. 
+
+A multi-stage Dockerfile contains multiple `FROM` instructions, each `FROM` instruction initiates a new build stage, optionally aliased with `AS <stage_name>`. Artifacts from previous stages can be copied into subsequent stages using the `COPY --from=<stage_name_or_index>` instruction. This allows only necessary files to be carried forward, leaving behind build tools, development dependencies, and other unnecessary components. Once the multi-stage `Dockerfile` is ready, use `docker build` command (by default, builds the final stage) to explicitly build an intermediate stage using the `--target` flag.
+
 <br/>
 
-Below is an example `Dockerfile` that builds a **Node.js** web application using a wide range of instructions to create a secure, lightweight, and well-documented image.
+Below is an example `Dockerfile` that demonstrates a multi-stage build using a wide range of instructions to create a secure, lightweight, and well-documented image. 
 ```
+# syntax=docker/dockerfile:1.4
+# This sets the Dockerfile syntax version (note `#` before `syntax`), enabling features like multi-stage builds.
+
+# ==============================================================================
+# STAGE 1: Build a backend application (builder image)
+# This stage uses a builder pattern to compile the application and manage dependencies, 
+# keeping the final production image small and clean by discarding build-time artifacts.
+# ==============================================================================
+
 # Define a build-time argument for the base image version
 ARG NODE_VERSION=20-alpine
-
-# Use an official Node.js runtime as the base image for the entire process
 FROM node:${NODE_VERSION} AS builder
 
 # Add descriptive labels for metadata and organization
-LABEL org.opencontainers.image.title="Single-Stage Node.js App" \
+# This is the modern replacement for the deprecated MAINTAINER instruction.
+LABEL org.opencontainers.image.title="My Multi-Stage App" \
       org.opencontainers.image.description="A comprehensive example of a Dockerfile using all instructions." \
       org.opencontainers.image.authors="ACME Inc." \
       org.opencontainers.image.licenses="MIT" \
-	  version="1.0.0"
+	  version="1.4.0"
 
 # Set a build-time argument that can be passed during the build command
 ARG APP_PORT=3000
@@ -152,44 +174,64 @@ ARG APP_PORT=3000
 # Set environment variables available during build and runtime
 ENV NODE_ENV=development \
     PORT=${APP_PORT}
-
-# Set the working directory inside the container for all subsequent instructions
+	
+# Set the working directory inside the container for subsequent instructions
 WORKDIR /app
 
-# Use the ADD instruction to get a remote file and extract it (for demonstration) and place it in the container
+# The ADD instruction is used here to download a remote file,
+# demonstrating its unique feature but COPY is preferred for local files
 ADD https://example.com/latest_version.tar.gz ./dependencies/
 
-# Copy package files first to leverage build caching
+# Copy package files first to leverage Docker's build cache if dependencies don't change
 COPY package*.json ./
 
 # Install application dependencies
 RUN npm install
 
-# Copy the rest of the application source code into the image
-COPY . .
-
 # Explicitly use the bash shell for the command
 SHELL ["/bin/bash", "-c"]
+RUN echo "Using Bash: $BASH_VERSION"
 
-# Define a mount point for a volume where the application could write logs
-VOLUME /var/log/app
-
-# Set the user to a non-root user for security
-RUN adduser -D myuser
-USER myuser
+# Copy the rest of the application source code
+COPY . .
 
 # Expose a port (for documentation, requires runtime flag to be published)
 EXPOSE ${PORT}
 
-# Define a health check to monitor if the application is running correctly
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-  CMD curl -f http://localhost:${PORT} || exit 1
+# ==============================================================================
+# STAGE 2: Create the final production image
+# This stage copies only the essential build artifacts and dependencies
+# from the previous "builder" stage.
+# ==============================================================================
 
-# Define the entrypoint for the container's primary executable, making the
-# image behave like a command-line tool.
-ENTRYPOINT ["npm"]
+# Use a minimal base image (like Alpine) for a small, secure final image
+FROM alpine:3.18
+
+# Define a volume to mark a mount point for persistent data, like logs
+VOLUME /var/log/myapp
+
+# Set the user to run the container as a non-root user for security
+RUN adduser -D appuser
+USER appuser
+
+# Specify commands to be executed later, when this image is used as a base image 
+# for another Dockerfile
+ONBUILD LABEL build-date="$(date)"
+
+# Set the custom SHELL to use bash for complex commands that follow
+SHELL ["/bin/bash", "-c"]
+
+# Specify the signal to send when a container is stopped
+STOPSIGNAL SIGTERM
+
+# Define a health check to monitor the application's health at runtime
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD curl -f http://localhost:${PORT}/health || exit 1
+
+# Define the entrypoint for the container's primary executable
+ENTRYPOINT ["node"]
 
 # Provide default arguments for the entrypoint
-CMD ["start"]
+CMD ["index.js"]
 
 ```
